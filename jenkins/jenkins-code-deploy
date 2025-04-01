@@ -15,11 +15,15 @@ pipeline {
         VPC_ID = 'vpc-01492ba4565811e72'
         SUBNETS = 'subnet-051d12c8ab62abfe9,subnet-0a048e1c80b3a77ae'
         LB_ARN = 'arn:aws:elasticloadbalancing:ap-south-2:182399696098:loadbalancer/app/Code-deploy-lb/ca85662328589264'
-        TARGET_GROUP_BLUE = 'arn:aws:elasticloadbalancing:ap-south-2:182399696098:targetgroup/fittbot-code-deploy-blue-tg/fb210a71fee9fa60'
-        TARGET_GROUP_GREEN = 'arn:aws:elasticloadbalancing:ap-south-2:182399696098:targetgroup/code-deploy-green-tg/cf379631e776b0e6'
+        TARGET_GROUP_BLUE = 'fittbot-code-deploy-blue-tg'
+        TARGET_GROUP_GREEN = 'code-deploy-green-tg'
+        TARGET_GROUP_BLUE_ARN = 'arn:aws:elasticloadbalancing:ap-south-2:182399696098:targetgroup/fittbot-code-deploy-blue-tg/fb210a71fee9fa60'
+        TARGET_GROUP_GREEN_ARN = 'arn:aws:elasticloadbalancing:ap-south-2:182399696098:targetgroup/code-deploy-green-tg/cf379631e776b0e6'
         CONTAINER_NAME = 'python-container'
         CONTAINER_PORT = '8080'
-        CODEDEPLOY_APP_NAME = 'my-codeDeploy-app'  // Add CodeDeploy application name here
+        CODEDEPLOY_APP_NAME = 'my-codeDeploy-app'
+        CODEDEPLOY_GROUP_NAME = 'my-codeDeploy-group'
+        SERVICE_ROLE_ARN = 'arn:aws:iam::182399696098:role/code-diploy-role'
     }
 
     stages {
@@ -84,37 +88,21 @@ pipeline {
             }
         }
 
-        stage('Deploy to ECS with ALB & Blue-Green Deployment') {
+        stage('Create or Update ECS Service with CodeDeploy Controller') {
             steps {
                 withAWS(credentials: 'aws-cred', region: "${AWS_REGION}") {
                     script {
                         sh """
-                        aws ecs create-service --cluster ${ECS_CLUSTER_NAME} \
-                        --service-name ${ECS_SERVICE_NAME} \
-                        --task-definition ${TASK_FAMILY} \
-                        --desired-count 1 \
-                        --launch-type FARGATE \
-                        --deployment-controller '{"type": "CODE_DEPLOY"}' \
-                        --load-balancers '[
-                            {
-                                "targetGroupArn": "${TARGET_GROUP_BLUE}",
-                                "containerName": "${CONTAINER_NAME}",
-                                "containerPort": ${CONTAINER_PORT}
-                            },
-                            {
-                                "targetGroupArn": "${TARGET_GROUP_GREEN}",
-                                "containerName": "${CONTAINER_NAME}",
-                                "containerPort": ${CONTAINER_PORT}
-                            }
-                        ]' \
-                        --network-configuration '{
-                            "awsvpcConfiguration": {
-                                "subnets": ["subnet-051d12c8ab62abfe9", "subnet-0a048e1c80b3a77ae"],
-                                "securityGroups": ["sg-039b87a814f4fee4d"],
-                                "assignPublicIp": "ENABLED"
-                            }
-                        }' \
-                        --region ${AWS_REGION}
+                        aws ecs create-service \
+                            --cluster ${ECS_CLUSTER_NAME} \
+                            --service-name ${ECS_SERVICE_NAME} \
+                            --desired-count 1 \
+                            --deployment-controller type=CODE_DEPLOY \
+                            --task-definition ${TASK_FAMILY} \
+                            --load-balancer "targetGroupArn=${TARGET_GROUP_BLUE_ARN},containerName=${CONTAINER_NAME},containerPort=${CONTAINER_PORT}" \
+                            --load-balancer "targetGroupArn=${TARGET_GROUP_GREEN_ARN},containerName=${CONTAINER_NAME},containerPort=${CONTAINER_PORT}" \
+                            --network-configuration "awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[\"sg-039b87a814f4fee4d\"],assignPublicIp=DISABLED}" \
+                            --region ${AWS_REGION}
                         """
                     }
                 }
@@ -127,10 +115,10 @@ pipeline {
                     script {
                         sh """
                         aws deploy create-deployment-group \
-                        --application-name ${CODEDEPLOY_APP_NAME} \  // Use the correct app name
-                        --deployment-group-name my-codeDeploy-group \
+                        --application-name ${CODEDEPLOY_APP_NAME} \
+                        --deployment-group-name ${CODEDEPLOY_GROUP_NAME} \
                         --deployment-config-name CodeDeployDefault.ECSAllAtOnce \
-                        --service-role-arn arn:aws:iam::182399696098:role/CodeDeployRole \
+                        --service-role-arn ${SERVICE_ROLE_ARN} \
                         --blue-green-deployment-configuration '{
                             "terminateBlueInstancesOnDeploymentSuccess": {
                                 "action": "TERMINATE",
@@ -149,8 +137,8 @@ pipeline {
                             "targetGroupPairInfoList": [
                                 {
                                     "targetGroups": [
-                                        {"name": "code-deploy-blue"},
-                                        {"name": "code-deploy-green-tg"}
+                                        {"name": "${TARGET_GROUP_BLUE}"},
+                                        {"name": "${TARGET_GROUP_GREEN}"}
                                     ],
                                     "prodTrafficRoute": {
                                         "listenerArns": ["${LB_ARN}"]
@@ -172,7 +160,7 @@ pipeline {
                         sh """
                         aws deploy create-deployment \
                         --application-name ${CODEDEPLOY_APP_NAME} \
-                        --deployment-group-name my-codeDeploy-group \
+                        --deployment-group-name ${CODEDEPLOY_GROUP_NAME} \
                         --revision '{
                             "revisionType": "AppSpecContent",
                             "appSpecContent": {
