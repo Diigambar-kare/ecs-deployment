@@ -1,0 +1,214 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION = 'ap-south-2'
+        ECR_REPO_NAME = 'fittbot/backend'
+        ECR_REGISTRY = '182399696098.dkr.ecr.ap-south-2.amazonaws.com/fittbot/backend'
+        GITHUB_REPO = 'https://github.com/Diigambar-kare/ecs-deployment.git'
+        IMAGE_TAG = 'latest'
+        ECS_CLUSTER_NAME = 'test-cluster1'
+        ECS_SERVICE_NAME = 'python-service'
+        TASK_FAMILY = 'python-task'
+        TASK_ROLE_ARN = 'arn:aws:iam::182399696098:role/ecsTaskRole'
+        EXECUTION_ROLE_ARN = 'arn:aws:iam::182399696098:role/ecsTaskExecutionRole'
+        VPC_ID = 'vpc-01492ba4565811e72'
+        SUBNETS = 'subnet-051d12c8ab62abfe9,subnet-0a048e1c80b3a77ae'
+        LB_ARN = 'arn:aws:elasticloadbalancing:ap-south-2:182399696098:loadbalancer/app/Code-deploy-lb/ca85662328589264'
+        TARGET_GROUP_BLUE = 'arn:aws:elasticloadbalancing:ap-south-2:182399696098:targetgroup/fittbot-code-deploy-blue-tg/fb210a71fee9fa60'
+        TARGET_GROUP_GREEN = 'arn:aws:elasticloadbalancing:ap-south-2:182399696098:targetgroup/code-deploy-green-tg/cf379631e776b0e6'
+        CONTAINER_NAME = 'python-container'
+        CONTAINER_PORT = '8080'
+        CODEDEPLOY_APP_NAME = 'my-codeDeploy-app'  // Add CodeDeploy application name here
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                git branch: 'main', url: "${GITHUB_REPO}"
+            }
+        }
+
+        stage('Build & Push Docker Image') {
+            steps {
+                withAWS(credentials: 'aws-cred', region: "${AWS_REGION}") {
+                    script {
+                        sh """
+                        aws sts get-caller-identity
+                        docker build -t ${ECR_REGISTRY}:${IMAGE_TAG} .
+                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                        docker push ${ECR_REGISTRY}:${IMAGE_TAG}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Register ECS Task Definition') {
+            steps {
+                withAWS(credentials: 'aws-cred', region: "${AWS_REGION}") {
+                    script {
+                        def taskDefinition = """
+                        {
+                            "family": "${TASK_FAMILY}",
+                            "networkMode": "awsvpc",
+                            "executionRoleArn": "${EXECUTION_ROLE_ARN}",
+                            "taskRoleArn": "${TASK_ROLE_ARN}",
+                            "requiresCompatibilities": ["FARGATE"],
+                            "cpu": "256",
+                            "memory": "512",
+                            "containerDefinitions": [
+                                {
+                                    "name": "${CONTAINER_NAME}",
+                                    "image": "${ECR_REGISTRY}:${IMAGE_TAG}",
+                                    "essential": true,
+                                    "memory": 512,
+                                    "cpu": 256,
+                                    "portMappings": [
+                                        {
+                                            "containerPort": ${CONTAINER_PORT},
+                                            "hostPort": ${CONTAINER_PORT},
+                                            "protocol": "tcp"
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                        """.stripIndent().trim()
+
+                        writeFile file: 'task-definition.json', text: taskDefinition
+
+                        sh "aws ecs register-task-definition --cli-input-json file://task-definition.json --region ${AWS_REGION}"
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to ECS with ALB & Blue-Green Deployment') {
+            steps {
+                withAWS(credentials: 'aws-cred', region: "${AWS_REGION}") {
+                    script {
+                        sh """
+                        aws ecs create-service --cluster ${ECS_CLUSTER_NAME} \
+                        --service-name ${ECS_SERVICE_NAME} \
+                        --task-definition ${TASK_FAMILY} \
+                        --desired-count 1 \
+                        --launch-type FARGATE \
+                        --deployment-controller '{"type": "CODE_DEPLOY"}' \
+                        --load-balancers '[
+                            {
+                                "targetGroupArn": "${TARGET_GROUP_BLUE}",
+                                "containerName": "${CONTAINER_NAME}",
+                                "containerPort": ${CONTAINER_PORT}
+                            },
+                            {
+                                "targetGroupArn": "${TARGET_GROUP_GREEN}",
+                                "containerName": "${CONTAINER_NAME}",
+                                "containerPort": ${CONTAINER_PORT}
+                            }
+                        ]' \
+                        --network-configuration '{
+                            "awsvpcConfiguration": {
+                                "subnets": ["subnet-051d12c8ab62abfe9", "subnet-0a048e1c80b3a77ae"],
+                                "securityGroups": ["sg-039b87a814f4fee4d"],
+                                "assignPublicIp": "ENABLED"
+                            }
+                        }' \
+                        --region ${AWS_REGION}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Create CodeDeploy Deployment Group') {
+            steps {
+                withAWS(credentials: 'aws-cred', region: "${AWS_REGION}") {
+                    script {
+                        sh """
+                        aws deploy create-deployment-group \
+                        --application-name ${CODEDEPLOY_APP_NAME} \  // Use the correct app name
+                        --deployment-group-name my-codeDeploy-group \
+                        --deployment-config-name CodeDeployDefault.ECSAllAtOnce \
+                        --service-role-arn arn:aws:iam::182399696098:role/CodeDeployRole \
+                        --blue-green-deployment-configuration '{
+                            "terminateBlueInstancesOnDeploymentSuccess": {
+                                "action": "TERMINATE",
+                                "terminationWaitTimeInMinutes": 5
+                            },
+                            "deploymentReadyOption": {
+                                "actionOnTimeout": "CONTINUE_DEPLOYMENT"
+                            }
+                        }' \
+                        --deployment-style '{
+                            "deploymentType": "BLUE_GREEN",
+                            "deploymentOption": "WITH_TRAFFIC_CONTROL"
+                        }' \
+                        --ecs-services clusterName=${ECS_CLUSTER_NAME},serviceName=${ECS_SERVICE_NAME} \
+                        --load-balancer-info '{
+                            "targetGroupPairInfoList": [
+                                {
+                                    "targetGroups": [
+                                        {"name": "code-deploy-blue"},
+                                        {"name": "code-deploy-green-tg"}
+                                    ],
+                                    "prodTrafficRoute": {
+                                        "listenerArns": ["${LB_ARN}"]
+                                    }
+                                }
+                            ]
+                        }' \
+                        --region ${AWS_REGION}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Deploy via CodeDeploy') {
+            steps {
+                withAWS(credentials: 'aws-cred', region: "${AWS_REGION}") {
+                    script {
+                        sh """
+                        aws deploy create-deployment \
+                        --application-name ${CODEDEPLOY_APP_NAME} \
+                        --deployment-group-name my-codeDeploy-group \
+                        --revision '{
+                            "revisionType": "AppSpecContent",
+                            "appSpecContent": {
+                                "content": "{
+                                    \\"version\\": 0.0,
+                                    \\"Resources\\": [
+                                        {
+                                            \\"TargetService\\": {
+                                                \\"Type\\": \\"AWS::ECS::Service\\",
+                                                \\"Properties\\": {
+                                                    \\"TaskDefinition\\": \\"${TASK_FAMILY}\\",
+                                                    \\"LoadBalancerInfo\\": {
+                                                        \\"ContainerName\\": \\"${CONTAINER_NAME}\\",
+                                                        \\"ContainerPort\\": ${CONTAINER_PORT}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    ]
+                                }"
+                            }
+                        }' \
+                        --region ${AWS_REGION}
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo '✅ Deployment Successful!'
+        }
+        failure {
+            echo '❌ Deployment Failed!'
+        }
+    }
+}
