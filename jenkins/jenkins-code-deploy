@@ -14,14 +14,13 @@ pipeline {
         EXECUTION_ROLE_ARN = 'arn:aws:iam::182399696098:role/ecsTaskExecutionRole'
         VPC_ID = 'vpc-01492ba4565811e72'
         SUBNETS = 'subnet-051d12c8ab62abfe9,subnet-0a048e1c80b3a77ae'
-        LB_ARN = 'arn:aws:elasticloadbalancing:ap-south-2:182399696098:loadbalancer/app/Code-deploy-lb/ca85662328589264'
-        TARGET_GROUP_BLUE = 'fittbot-code-deploy-blue-tg'
-        TARGET_GROUP_GREEN = 'code-deploy-green-tg'
-        TARGET_GROUP_BLUE_ARN = 'arn:aws:elasticloadbalancing:ap-south-2:182399696098:targetgroup/fittbot-code-deploy-blue-tg/fb210a71fee9fa60'
-        TARGET_GROUP_GREEN_ARN = 'arn:aws:elasticloadbalancing:ap-south-2:182399696098:targetgroup/code-deploy-green-tg/cf379631e776b0e6'
+        LISTENER_ARN = 'arn:aws:elasticloadbalancing:ap-south-2:182399696098:listener/app/ecs-code-deploy-lb/86f740f078924c1d/685768325bb648df'
+        TARGET_GROUP_BLUE_NAME = 'ecs-blue-tg-ip'
+        TARGET_GROUP_GREEN_NAME = 'ecs-green-tg-ip'
+        LOAD_BALANCER_NAME = 'ecs-code-deploy-lb'
         CONTAINER_NAME = 'python-container'
         CONTAINER_PORT = '8080'
-        CODEDEPLOY_APP_NAME = 'my-codeDeploy-app'
+        CODEDEPLOY_APP_NAME = 'Mycode'
         CODEDEPLOY_GROUP_NAME = 'my-codeDeploy-group'
         SERVICE_ROLE_ARN = 'arn:aws:iam::182399696098:role/code-diploy-role'
     }
@@ -52,57 +51,49 @@ pipeline {
             steps {
                 withAWS(credentials: 'aws-cred', region: "${AWS_REGION}") {
                     script {
-                        def taskDefinition = """
-                        {
-                            "family": "${TASK_FAMILY}",
-                            "networkMode": "awsvpc",
-                            "executionRoleArn": "${EXECUTION_ROLE_ARN}",
-                            "taskRoleArn": "${TASK_ROLE_ARN}",
-                            "requiresCompatibilities": ["FARGATE"],
-                            "cpu": "256",
-                            "memory": "512",
-                            "containerDefinitions": [
-                                {
-                                    "name": "${CONTAINER_NAME}",
-                                    "image": "${ECR_REGISTRY}:${IMAGE_TAG}",
-                                    "essential": true,
-                                    "memory": 512,
-                                    "cpu": 256,
-                                    "portMappings": [
-                                        {
-                                            "containerPort": ${CONTAINER_PORT},
-                                            "hostPort": ${CONTAINER_PORT},
-                                            "protocol": "tcp"
-                                        }
-                                    ]
-                                }
-                            ]
-                        }
-                        """.stripIndent().trim()
-
-                        writeFile file: 'task-definition.json', text: taskDefinition
-
-                        sh "aws ecs register-task-definition --cli-input-json file://task-definition.json --region ${AWS_REGION}"
+                        sh """
+                        aws ecs register-task-definition \
+                        --family ${TASK_FAMILY} \
+                        --network-mode awsvpc \
+                        --execution-role-arn ${EXECUTION_ROLE_ARN} \
+                        --task-role-arn ${TASK_ROLE_ARN} \
+                        --requires-compatibilities FARGATE \
+                        --cpu "256" \
+                        --memory "512" \
+                        --container-definitions '[{
+                            "name": "${CONTAINER_NAME}",
+                            "image": "${ECR_REGISTRY}:${IMAGE_TAG}",
+                            "essential": true,
+                            "memory": 512,
+                            "cpu": 256,
+                            "portMappings": [{
+                                "containerPort": ${CONTAINER_PORT},
+                                "hostPort": ${CONTAINER_PORT},
+                                "protocol": "tcp"
+                            }]
+                        }]' \
+                        --region ${AWS_REGION}
+                        """
                     }
                 }
             }
         }
 
-        stage('Create or Update ECS Service with CodeDeploy Controller') {
+        stage('Create ECS Service') {
             steps {
                 withAWS(credentials: 'aws-cred', region: "${AWS_REGION}") {
                     script {
                         sh """
                         aws ecs create-service \
-                            --cluster ${ECS_CLUSTER_NAME} \
-                            --service-name ${ECS_SERVICE_NAME} \
-                            --desired-count 1 \
-                            --deployment-controller type=CODE_DEPLOY \
-                            --task-definition ${TASK_FAMILY} \
-                            --load-balancer "targetGroupArn=${TARGET_GROUP_BLUE_ARN},containerName=${CONTAINER_NAME},containerPort=${CONTAINER_PORT}" \
-                            --load-balancer "targetGroupArn=${TARGET_GROUP_GREEN_ARN},containerName=${CONTAINER_NAME},containerPort=${CONTAINER_PORT}" \
-                            --network-configuration "awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[\"sg-039b87a814f4fee4d\"],assignPublicIp=DISABLED}" \
-                            --region ${AWS_REGION}
+                        --cluster ${ECS_CLUSTER_NAME} \
+                        --service-name ${ECS_SERVICE_NAME} \
+                        --task-definition ${TASK_FAMILY} \
+                        --desired-count 1 \
+                        --launch-type FARGATE \
+                        --deployment-controller '{"type": "CODE_DEPLOY"}' \
+                        --network-configuration "awsvpcConfiguration={subnets=[subnet-051d12c8ab62abfe9,subnet-0a048e1c80b3a77ae],securityGroups=[sg-0f119db93630df7d6],assignPublicIp=ENABLED}" \
+                        --load-balancers '[{"targetGroupArn":"arn:aws:elasticloadbalancing:ap-south-2:182399696098:targetgroup/ecs-blue-tg-ip/253fa61978743be8","containerName":"${CONTAINER_NAME}","containerPort":${CONTAINER_PORT}}]' \
+                        --region ${AWS_REGION}
                         """
                     }
                 }
@@ -137,11 +128,11 @@ pipeline {
                             "targetGroupPairInfoList": [
                                 {
                                     "targetGroups": [
-                                        {"name": "${TARGET_GROUP_BLUE}"},
-                                        {"name": "${TARGET_GROUP_GREEN}"}
+                                        {"name": "${TARGET_GROUP_BLUE_NAME}"},
+                                        {"name": "${TARGET_GROUP_GREEN_NAME}"}
                                     ],
                                     "prodTrafficRoute": {
-                                        "listenerArns": ["${LB_ARN}"]
+                                        "listenerArns": ["${LISTENER_ARN}"]
                                     }
                                 }
                             ]
@@ -151,52 +142,6 @@ pipeline {
                     }
                 }
             }
-        }
-
-        stage('Deploy via CodeDeploy') {
-            steps {
-                withAWS(credentials: 'aws-cred', region: "${AWS_REGION}") {
-                    script {
-                        sh """
-                        aws deploy create-deployment \
-                        --application-name ${CODEDEPLOY_APP_NAME} \
-                        --deployment-group-name ${CODEDEPLOY_GROUP_NAME} \
-                        --revision '{
-                            "revisionType": "AppSpecContent",
-                            "appSpecContent": {
-                                "content": "{
-                                    \\"version\\": 0.0,
-                                    \\"Resources\\": [
-                                        {
-                                            \\"TargetService\\": {
-                                                \\"Type\\": \\"AWS::ECS::Service\\",
-                                                \\"Properties\\": {
-                                                    \\"TaskDefinition\\": \\"${TASK_FAMILY}\\",
-                                                    \\"LoadBalancerInfo\\": {
-                                                        \\"ContainerName\\": \\"${CONTAINER_NAME}\\",
-                                                        \\"ContainerPort\\": ${CONTAINER_PORT}
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    ]
-                                }"
-                            }
-                        }' \
-                        --region ${AWS_REGION}
-                        """
-                    }
-                }
-            }
-        }
-    }
-
-    post {
-        success {
-            echo '✅ Deployment Successful!'
-        }
-        failure {
-            echo '❌ Deployment Failed!'
         }
     }
 }
