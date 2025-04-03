@@ -1,0 +1,5 @@
+prometheus_client==0.21.1
+requests
+fastapi==0.115.6
+gunicorn==23.0.0
+uvicorn==0.34.0
