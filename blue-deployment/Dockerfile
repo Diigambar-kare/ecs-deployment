@@ -30,7 +30,8 @@ WORKDIR /app
 COPY requirements.txt /app/
 
 # Install the required dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir gunicorn uvicorn prometheus_client loguru requests
 
 # Install additional dependencies (prometheus_client, loguru, requests)
 RUN pip install --no-cache-dir prometheus_client loguru requests
