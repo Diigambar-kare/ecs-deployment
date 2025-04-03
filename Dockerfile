@@ -42,5 +42,5 @@ COPY . /app/
 EXPOSE 8000
 
 # Run the Python script
-CMD ["python3", "test.py"]
+CMD ["gunicorn", "test:app", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--workers", "2"]
 
