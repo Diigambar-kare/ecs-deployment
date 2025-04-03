@@ -1,46 +1,19 @@
-# Use the official Python image from the Docker Hub
-#FROM python:3.9-slim
+# Use an official Python runtime as a parent image
+FROM python:3.11
 
-# Set the working directory inside the container
-#WORKDIR /app
-
-# Copy your application files into the container
-#COPY . /app
-
-# Install the required dependencies
-#RUN pip install --no-cache-dir -r requirements.txt
-#RUN pip install prometheus_client
-#RUN pip install loguru  # Install loguru instead of loki-logger
-#RUN pip install requests
-# Expose the Prometheus metrics port
-#EXPOSE 8000
-
-# Run the Python script
-#CMD ["python3", "test.py"]
-
-
-# Use a specific Python version from the Docker Hub
- FROM python:3.9-alpine
-
-
-# Set the working directory inside the container
+# Set the working directory in the container
 WORKDIR /app
 
-# Copy the requirements.txt file first to leverage Docker's cache
-COPY requirements.txt /app/
+# Copy the requirements file and install dependencies
+COPY requirements.txt .
 
-# Install the required dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install additional dependencies (prometheus_client, loguru, requests)
-RUN pip install --no-cache-dir prometheus_client loguru requests
+# Copy the rest of the application
+COPY . .
 
-# Copy your application files into the container
-COPY . /app/
-
-# Expose the Prometheus metrics port
+# Expose the application port
 EXPOSE 8000
 
-# Run the Python script
-CMD ["gunicorn", "test:app", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--workers", "2"]
-
+# Command to run the FastAPI app using Uvicorn
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
