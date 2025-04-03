@@ -3,9 +3,9 @@ import datetime
 import logging
 import random
 from prometheus_client import start_http_server, Counter
-from fastapi import FastApi
+from fastapi import FastAPI
 
-app=FastApi()
+app=FastAPI()
 
 # Setup logging configuration to log to a file
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', filename='/var/log/my_python_app.log')
