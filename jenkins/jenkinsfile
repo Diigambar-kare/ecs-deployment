@@ -39,9 +39,12 @@ pipeline {
                 withAWS(credentials: 'aws-cred', region: "${AWS_REGION}") {
                     script {
                         sh """
+                        echo "Logging in to AWS ECR..."
                         aws sts get-caller-identity
-                        docker build -t ${ECR_REGISTRY}:${IMAGE_TAG} -f ${DOCKERFILE_PATH} blue-deployment 
                         aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+
+                        echo "Building and pushing Docker image..."
+                        docker build -t ${ECR_REGISTRY}:${IMAGE_TAG} -f ${DOCKERFILE_PATH} blue-deployment
                         docker push ${ECR_REGISTRY}:${IMAGE_TAG}
                         """
                     }
@@ -54,6 +57,7 @@ pipeline {
                 withAWS(credentials: 'aws-cred', region: "${AWS_REGION}") {
                     script {
                         sh """
+                        echo "Registering new ECS Task Definition..."
                         aws ecs register-task-definition \
                         --family ${TASK_FAMILY} \
                         --network-mode awsvpc \
@@ -90,7 +94,7 @@ pipeline {
                 withAWS(credentials: 'aws-cred', region: "${AWS_REGION}") {
                     script {
                         def serviceExists = sh(
-                            script: "aws ecs describe-services --cluster ${ECS_CLUSTER_NAME} --services ${ECS_SERVICE_NAME} --region ${AWS_REGION} --query 'services[0].status' --output text",
+                            script: "aws ecs describe-services --cluster ${ECS_CLUSTER_NAME} --services ${ECS_SERVICE_NAME} --region ${AWS_REGION} --query 'services[0].status' --output text || echo 'MISSING'",
                             returnStdout: true
                         ).trim()
 
@@ -119,6 +123,7 @@ pipeline {
                 withAWS(credentials: 'aws-cred', region: "${AWS_REGION}") {
                     script {
                         sh """
+                        echo "Creating CodeDeploy Deployment Group..."
                         aws deploy create-deployment-group \
                         --application-name ${CODEDEPLOY_APP_NAME} \
                         --deployment-group-name ${CODEDEPLOY_GROUP_NAME} \
@@ -168,9 +173,32 @@ pipeline {
                 withAWS(credentials: 'aws-cred', region: "${AWS_REGION}") {
                     script {
                         sh """
+                        echo "Creating AppSpec file..."
+                        cat > appspec.json <<EOF
+                        {
+                            "version": 0.0,
+                            "Resources": [
+                                {
+                                    "TargetService": {
+                                        "Type": "AWS::ECS::Service",
+                                        "Properties": {
+                                            "TaskDefinition": "${TASK_FAMILY}",
+                                            "LoadBalancerInfo": {
+                                                "ContainerName": "${CONTAINER_NAME}",
+                                                "ContainerPort": ${CONTAINER_PORT}
+                                            }
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                        EOF
+
+                        echo "Triggering CodeDeploy deployment..."
                         aws deploy create-deployment \
                         --application-name ${CODEDEPLOY_APP_NAME} \
                         --deployment-group-name ${CODEDEPLOY_GROUP_NAME} \
+                        --revision file://appspec.json \
                         --region ${AWS_REGION}
                         """
                     }
