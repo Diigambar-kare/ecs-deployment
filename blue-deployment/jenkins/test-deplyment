@@ -1,0 +1,125 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION = 'ap-south-2'
+        ECR_REPO_NAME = 'fittbot/backend'
+        ECR_REGISTRY = '182399696098.dkr.ecr.ap-south-2.amazonaws.com/fittbot/backend'
+        GITHUB_REPO = 'https://github.com/Diigambar-kare/ecs-deployment.git'
+        IMAGE_TAG = 'blue-deployment'
+        ECS_CLUSTER_NAME = 'test-cluster1'
+        ECS_SERVICE_NAME = 'blue-deployment-service-new'
+        TASK_FAMILY = '	blue-task'
+        TASK_ROLE_ARN = 'arn:aws:iam::182399696098:role/ecsTaskRole'
+        EXECUTION_ROLE_ARN = 'arn:aws:iam::182399696098:role/ecsTaskExecutionRole'
+        LISTENER_ARN = 'arn:aws:elasticloadbalancing:ap-south-2:182399696098:listener/app/dig-test-lb/0d7a148137ab0033/f5f13bb5bcaede0f'
+        TARGET_GROUP_BLUE_NAME = 'blue-dig-tg'
+        TARGET_GROUP_GREEN_NAME = 'green-dig-tg'
+        CONTAINER_NAME = 'blue-deployment-container'
+        CONTAINER_PORT = '8000'
+        CODEDEPLOY_APP_NAME = 'AppECS-test-cluster1-blue-deployment-service-new'
+        CODEDEPLOY_GROUP_NAME = 'DgpECS-test-cluster1-blue-deployment-service-new'
+        SERVICE_ROLE_ARN = 'arn:aws:iam::182399696098:role/code-deploy-ecs'
+        DOCKERFILE_PATH = 'blue-deployment/Dockerfile' 
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                git branch: 'main', url: "${GITHUB_REPO}"
+            }
+        }
+
+        stage('Build & Push Docker Image') {
+            steps {
+                withAWS(credentials: 'aws-cred', region: "${AWS_REGION}") {
+                    script {
+                        sh """
+                        echo "Logging in to AWS ECR..."
+                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+
+                        echo "Building and pushing Docker image..."
+                        docker build -t ${ECR_REGISTRY}:${IMAGE_TAG} -f ${DOCKERFILE_PATH} blue-deployment
+                        docker push ${ECR_REGISTRY}:${IMAGE_TAG}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Register ECS Task Definition') {
+            steps {
+                withAWS(credentials: 'aws-cred', region: "${AWS_REGION}") {
+                    script {
+                        sh """
+                        echo "Registering new ECS Task Definition..."
+                        aws ecs register-task-definition \
+                        --family ${TASK_FAMILY} \
+                        --network-mode awsvpc \
+                        --execution-role-arn ${EXECUTION_ROLE_ARN} \
+                        --task-role-arn ${TASK_ROLE_ARN} \
+                        --requires-compatibilities FARGATE \
+                        --cpu "256" \
+                        --memory "512" \
+                        --container-definitions '[{
+                            "name": "${CONTAINER_NAME}",
+                            "image": "${ECR_REGISTRY}:${IMAGE_TAG}",
+                            "essential": true,
+                            "memory": 512,
+                            "cpu": 256,
+                            "portMappings": [{
+                                "containerPort": ${CONTAINER_PORT},
+                                "hostPort": ${CONTAINER_PORT},
+                                "protocol": "tcp"
+                            }]
+                        }]' \
+                        --region ${AWS_REGION}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Trigger Deployment') {
+            steps {
+                withAWS(credentials: 'aws-cred', region: "${AWS_REGION}") {
+                    script {
+                        sh """
+                        echo "Fetching latest Task Revision..."
+                        TASK_REVISION=\$(aws ecs describe-task-definition --task-definition ${TASK_FAMILY} --query 'taskDefinition.revision' --output text)
+                        echo "Latest Task Revision: \$TASK_REVISION"
+
+                        echo "Creating AppSpec file..."
+                        cat > appspec.json <<EOF
+                        {
+                            "version": 0.0,
+                            "Resources": [
+                                {
+                                    "TargetService": {
+                                        "Type": "AWS::ECS::Service",
+                                        "Properties": {
+                                            "TaskDefinition": "${TASK_FAMILY}:\$TASK_REVISION",
+                                            "LoadBalancerInfo": {
+                                                "ContainerName": "${CONTAINER_NAME}",
+                                                "ContainerPort": ${CONTAINER_PORT}
+                                            }
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                        EOF
+
+                        echo "Triggering CodeDeploy deployment..."
+                        aws deploy create-deployment \
+                        --application-name ${CODEDEPLOY_APP_NAME} \
+                        --deployment-group-name ${CODEDEPLOY_GROUP_NAME} \
+                        --revision "{\\\"revisionType\\\": \\\"AppSpecContent\\\", \\\"appSpecContent\\\": {\\\"content\\\": \\\"\$(cat appspec.json | jq -c .)\\\"}}" \
+                        --region ${AWS_REGION}
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
